@@ -115,7 +115,7 @@ internal partial class Program
                 if (msgBase is Message msg && msg.media is not null)
                 {
                     Console.WriteLine($"[{from}/{msg.ID}/{msg.Date:O}]>>");
-                    await ProcessMedia(fileManager, msg.media, msg.ID, msg.From.ID, chatId);
+                    await ProcessMedia(fileManager, msg.media, msg.ID, from.ID, chatId);
                 }
             }
             offset_id = messages.Messages[^1].ID;
@@ -239,19 +239,16 @@ internal partial class Program
             switch (msgMedia)
             {
                 case MessageMediaPhoto photo:
-                    Console.WriteLine($"[MSG<{msgId}>]");
                     Console.WriteLine("[Photo]");
                     Console.WriteLine(photo.photo.ID);
                     await Download(fileManager, photo.photo, msgId, msgAuthor, msgChannel);
                     break;
                 case MessageMediaDocument document:
-                    Console.WriteLine($"[MSG<{msgId}>]");
                     Console.WriteLine("[Document]");
                     Console.WriteLine(document.document.ID);
                     await Download(fileManager, document.document, msgId, msgAuthor, msgChannel);
                     break;
                 case MessageMediaPaidMedia paidmedia:
-                    Console.WriteLine($"[MSG<{msgId}>]");
                     Console.WriteLine("[PaidMedia]");
                     foreach (MessageExtendedMedia media in paidmedia.extended_media.OfType<MessageExtendedMedia>())
                     {
