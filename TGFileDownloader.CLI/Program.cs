@@ -280,7 +280,7 @@ internal partial class Program
             c.MaxAutoReconnects = int.MaxValue;
         })
         {
-            Log = msg => Log(LOG_INFO, msg)
+            Log = msg => Log(LOG_DEBUG, msg)
         };
         Console.Write("输入聊天 ID 来获取数据：");
         Console.Write(">>> ");
