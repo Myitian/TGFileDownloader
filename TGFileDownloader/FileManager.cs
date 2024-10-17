@@ -1,28 +1,18 @@
 ﻿using Microsoft.Data.Sqlite;
+using System.Collections.Concurrent;
 using TL;
 using WTelegram;
-using System.Collections.Concurrent;
-using System.Threading.Tasks;
 
 namespace TGFileDownloader;
 
-internal class FileManager : IDisposable
+public class FileManager : IDisposable
 {
-    struct Union<T1, T2>
-    {
-        public bool UseT2;
-        public T1 Value1;
-        public T1 Value2;
-    }
-
     readonly SqliteConnection connection;
-    readonly BlockingCollection<Union<Photo, Document>> queue = new(100);
-    readonly Thread[] threads = new Thread[10];
-    readonly Client tgClient;
+    bool disposed = false;
 
-    public FileManager(Client client, bool memoryDB = false)
+    public Action<string>? Log { get; set; }
+    public FileManager(bool memoryDB = false)
     {
-        tgClient = client;
         connection = new SqliteConnection(memoryDB ?
             "Data Source=:memory:" :
             "Data Source=TGFDL.db");
@@ -42,14 +32,49 @@ CREATE TABLE IF NOT EXISTS `FILES` (
     `IsFinished`      INTEGER               NOT NULL,
     `MessageID`       INTEGER               NOT NULL,
     `AuthorID`        INTEGER               NOT NULL,
-    `ChannelID`       INTEGER               NOT NULL
+    `ChannelID`       INTEGER               NOT NULL,
+    `ExtraData`       BLOB
 )";
         command.ExecuteNonQuery();
+        try
+        {
+            using SqliteCommand commandAddBlob = connection.CreateCommand();
+            commandAddBlob.CommandText = "ALTER TABLE `FILES` ADD COLUMN `ExtraData` BLOB;";
+            commandAddBlob.ExecuteNonQuery();
+        }
+        catch { }
     }
 
-    private SqliteParameter CreateParameter(string name, object? value)
+    public void Dispose()
     {
-        return new(name, value ?? DBNull.Value);
+        if (!disposed)
+        {
+            disposed = true;
+            connection.Dispose();
+        }
+        GC.SuppressFinalize(this);
+    }
+
+    public Stream? GetExtraData(long id)
+    {
+        using SqliteCommand command = connection.CreateCommand();
+        command.CommandText =
+@"
+SELECT
+    `ExtraData`
+FROM
+    `FILES`
+WHERE
+    `ID` == $ID;
+";
+        SqliteParameter parameter = CreateParameter("$ID", id);
+        command.Parameters.Add(parameter);
+        using SqliteDataReader reader = command.ExecuteReader();
+        if (!reader.Read())
+            return null;
+        if (reader.IsDBNull(0))
+            return null;
+        return reader.GetStream(0);
     }
 
     public TGFileInfo? GetFileInfo(long id)
@@ -95,6 +120,49 @@ WHERE
             AuthorID = reader.GetInt64(10),
             ChannelID = reader.GetInt64(11)
         };
+    }
+
+    public bool QueryIsFinished(long id, out string? fileName)
+    {
+        using SqliteCommand command = connection.CreateCommand();
+        command.CommandText =
+@"
+SELECT
+    `IsFinished`,
+    `FileName`
+FROM
+    `FILES`
+WHERE
+    `ID` == $ID;
+";
+        SqliteParameter parameter = CreateParameter("$ID", id);
+        command.Parameters.Add(parameter);
+        using SqliteDataReader reader = command.ExecuteReader();
+        if (!reader.Read())
+        {
+            fileName = null;
+            return false;
+        }
+        fileName = reader.GetValue(1) as string;
+        return reader.GetBoolean(0);
+    }
+
+    public int UpdateExtraData(long id, byte[] data)
+    {
+        using SqliteCommand command = connection.CreateCommand();
+        command.CommandText =
+@"
+UPDATE `FILES` SET
+    `ExtraData`      = $ExtraData
+WHERE
+    `ID`             = $ID            ;
+";
+        SqliteParameter pID = CreateParameter("$ID", id);
+        command.Parameters.Add(pID);
+        SqliteParameter pExtraData = CreateParameter("$ExtraData", data);
+        command.Parameters.Add(pExtraData);
+
+        return command.ExecuteNonQuery();
     }
 
     public int UpdateFileInfo(TGFileInfo info)
@@ -169,95 +237,6 @@ INSERT INTO `FILES` (
         return command.ExecuteNonQuery();
     }
 
-    public void UpdateFileProgress(long id, long downloadedSize, Storage_FileType type)
-    {
-        bool isPhoto = false;
-        using (SqliteCommand commandRead = connection.CreateCommand())
-        {
-            commandRead.CommandText =
-    @"
-SELECT
-    `FileType`
-FROM
-    `FILES`
-WHERE
-    `ID` == $ID;
-";
-            SqliteParameter parameter = CreateParameter("$ID", id);
-            commandRead.Parameters.Add(parameter);
-            switch (commandRead.ExecuteScalar())
-            {
-                case null:
-                    return;
-                case long v when v == (long)FileType.Photo:
-                    isPhoto = true;
-                    break;
-            }
-        }
-        using SqliteCommand commandWrite = connection.CreateCommand();
-        if (isPhoto)
-        {
-            commandWrite.CommandText =
-@"
-UPDATE `FILES` SET
-    `Extension`      = $Extension     ,
-    `MIME`           = $MIME          ,
-    `DownloadedSize` = $DownloadedSize
-WHERE
-    `ID`             = $ID            ;
-";
-            SqliteParameter pExtension = CreateParameter("$Extension", $".{type}");
-            commandWrite.Parameters.Add(pExtension);
-            SqliteParameter pMIME = CreateParameter("$MIME", type.GetMIME());
-            commandWrite.Parameters.Add(pMIME);
-            SqliteParameter pDownloadedSize = CreateParameter("$DownloadedSize", downloadedSize);
-            commandWrite.Parameters.Add(pDownloadedSize);
-            SqliteParameter pID = CreateParameter("$ID", id);
-            commandWrite.Parameters.Add(pID);
-        }
-        else
-        {
-            commandWrite.CommandText =
-@"
-UPDATE `FILES` SET
-    `DownloadedSize` = $DownloadedSize
-WHERE
-    `ID`             = $ID            ;
-";
-            SqliteParameter pDownloadedSize = CreateParameter("$DownloadedSize", downloadedSize);
-            commandWrite.Parameters.Add(pDownloadedSize);
-            SqliteParameter pID = CreateParameter("$ID", id);
-            commandWrite.Parameters.Add(pID);
-        }
-        commandWrite.ExecuteNonQuery();
-
-    }
-
-    public bool QueryIsFinished(long id, out string? fileName)
-    {
-        using SqliteCommand command = connection.CreateCommand();
-        command.CommandText =
-@"
-SELECT
-    `IsFinished`,
-    `FileName`
-FROM
-    `FILES`
-WHERE
-    `ID` == $ID;
-";
-        SqliteParameter parameter = CreateParameter("$ID", id);
-        command.Parameters.Add(parameter);
-        using SqliteDataReader reader = command.ExecuteReader();
-        if (!reader.Read())
-        {
-            fileName = null;
-            return false;
-        }
-        fileName = reader.GetValue(1) as string;
-        return reader.GetBoolean(0);
-    }
-
     public int UpdateFileIsFinished(long id, bool isFinished)
     {
         using SqliteCommand command = connection.CreateCommand();
@@ -294,165 +273,73 @@ WHERE
         return command.ExecuteNonQuery();
     }
 
-    public async Task<string> DownloadFileAsync(
-        Document document,
-        Stream outputStream,
-        Client.ProgressCallback? progress = null,
-        long message = 0,
-        long author = 0,
-        long channel = 0)
+    public void UpdateFileProgress(long id, long downloadedSize, Storage_FileType? type = null)
     {
-        long id = document.id;
-        InputDocumentFileLocation location = document.ToFileLocation((PhotoSizeBase?)null);
-        TGFileInfo? fileInfo = GetFileInfo(id);
-        if (!fileInfo.HasValue)
-        {
-            fileInfo = new()
+        bool isPhoto = false;
+        if (type.HasValue)
+            using (SqliteCommand commandRead = connection.CreateCommand())
             {
-                ID = id,
-                RawFileName = document.Filename,
-                Extension = Path.GetExtension(document.Filename),
-                MIME = document.mime_type,
-                FileType = FileType.Document,
-                FileSize = document.size,
-                DownloadedSize = 0,
-                IsFinished = false,
-                MessageID = message,
-                AuthorID = author,
-                ChannelID = channel
-            };
-            UpdateFileInfo(fileInfo.Value);
-        }
-        await DownloadFileAsync(id, location, outputStream, document.dc_id, fileInfo.Value.DownloadedSize, document.size, progress);
-        return document.mime_type;
-    }
-    public async Task<Storage_FileType> DownloadFileAsync(
-        Photo photo,
-        Stream outputStream,
-        Client.ProgressCallback? progress = null,
-        long message = 0,
-        long author = 0,
-        long channel = 0)
-    {
-        long id = photo.id;
-        PhotoSizeBase photoSize = photo.LargestPhotoSize;
-        InputPhotoFileLocation location = photo.ToFileLocation(photoSize);
-        TGFileInfo? fileInfo = GetFileInfo(id);
-        if (!fileInfo.HasValue)
-        {
-            fileInfo = new()
-            {
-                ID = id,
-                RawFileName = null,
-                Extension = null,
-                MIME = null,
-                FileType = FileType.Photo,
-                FileSize = photoSize.FileSize,
-                DownloadedSize = 0,
-                IsFinished = false,
-                MessageID = message,
-                AuthorID = author,
-                ChannelID = channel
-            };
-            UpdateFileInfo(fileInfo.Value);
-        }
-        return await DownloadFileAsync(id, location, outputStream, photo.dc_id, fileInfo.Value.DownloadedSize, photoSize.FileSize, progress);
-    }
-    public async Task<Storage_FileType> DownloadFileAsync(
-        long id,
-        InputFileLocationBase fileLocation,
-        Stream outputStream,
-        int dc_id,
-        long offset = 0,
-        long fileSize = 0,
-        Client.ProgressCallback? progress = null)
-    {
-        Storage_FileType fileType = Storage_FileType.unknown;
-        Client client = await tgClient.GetClientForDC(-dc_id, true);
-        if (outputStream.CanSeek)
-        {
-            outputStream.SetLength(offset);
-            outputStream.Seek(offset, SeekOrigin.Begin);
-        }
-        UpdateFileProgress(id, offset, fileType);
-        progress?.Invoke(offset, fileSize);
-        bool abort = false;
-        while (!abort)
-        {
-            Upload_FileBase fileBase;
-            try
-            {
-                fileBase = await client.Upload_GetFile(fileLocation, offset, client.FilePartSize);
-            }
-            catch (RpcException ex) when (ex.Code == 303 && ex.Message == "FILE_MIGRATE_X")
-            {
-                client = await client.GetClientForDC(-ex.X, true);
-                fileBase = await client.Upload_GetFile(fileLocation, offset, client.FilePartSize);
-            }
-            catch (RpcException ex) when (ex.Code == 400 && ex.Message == "OFFSET_INVALID")
-            {
-                abort = true;
-                break;
-            }
-            catch (Exception)
-            {
-                await outputStream.FlushAsync();
-                throw;
-            }
-            if (fileBase is not Upload_File fileData)
-                throw new WTException("Upload_GetFile returned unsupported " + fileBase?.GetType().Name);
-            if (fileData.bytes.Length != client.FilePartSize)
-                abort = true;
-            if (fileData.bytes.Length != 0)
-            {
-                fileType = fileData.type;
-                try
+                commandRead.CommandText =
+@"
+SELECT
+    `FileType`
+FROM
+    `FILES`
+WHERE
+    `ID` == $ID;
+";
+                SqliteParameter parameter = CreateParameter("$ID", id);
+                commandRead.Parameters.Add(parameter);
+                switch (commandRead.ExecuteScalar())
                 {
-                    await outputStream.WriteAsync(fileData.bytes.AsMemory());
-                    offset += fileData.bytes.Length;
-                    UpdateFileProgress(id, offset, fileType);
-                    progress?.Invoke(offset, fileSize);
-                }
-                catch (Exception)
-                {
-                    await outputStream.FlushAsync();
-                    throw;
-                }
-                finally
-                {
+                    case null:
+                        return;
+                    case long v when v == (long)FileType.Photo:
+                        isPhoto = true;
+                        break;
                 }
             }
-            if (fileSize != 0 && offset > fileSize)
-                throw new WTException("Downloaded file size does not match expected file size");
+        using SqliteCommand commandWrite = connection.CreateCommand();
+        if (isPhoto && type.HasValue)
+        {
+            commandWrite.CommandText =
+@"
+UPDATE `FILES` SET
+    `Extension`      = $Extension     ,
+    `MIME`           = $MIME          ,
+    `DownloadedSize` = $DownloadedSize
+WHERE
+    `ID`             = $ID            ;
+";
+            SqliteParameter pExtension = CreateParameter("$Extension", $".{type.Value}");
+            commandWrite.Parameters.Add(pExtension);
+            SqliteParameter pMIME = CreateParameter("$MIME", type.Value.GetMIME());
+            commandWrite.Parameters.Add(pMIME);
+            SqliteParameter pDownloadedSize = CreateParameter("$DownloadedSize", downloadedSize);
+            commandWrite.Parameters.Add(pDownloadedSize);
+            SqliteParameter pID = CreateParameter("$ID", id);
+            commandWrite.Parameters.Add(pID);
         }
-        await outputStream.FlushAsync();
-        UpdateFileIsFinished(id, true);
-        return fileType;
+        else
+        {
+            commandWrite.CommandText =
+@"
+UPDATE `FILES` SET
+    `DownloadedSize` = $DownloadedSize
+WHERE
+    `ID`             = $ID            ;
+";
+            SqliteParameter pDownloadedSize = CreateParameter("$DownloadedSize", downloadedSize);
+            commandWrite.Parameters.Add(pDownloadedSize);
+            SqliteParameter pID = CreateParameter("$ID", id);
+            commandWrite.Parameters.Add(pID);
+        }
+        commandWrite.ExecuteNonQuery();
+
     }
 
-    public void Dispose()
+    static SqliteParameter CreateParameter(string name, object? value)
     {
-        connection.Dispose();
+        return new(name, value ?? DBNull.Value);
     }
-}
-
-struct TGFileInfo
-{
-    public long ID;
-    public string? RawFileName;
-    public string? FileName;
-    public string? Extension;
-    public string? MIME;
-    public FileType FileType;
-    public long FileSize;
-    public long DownloadedSize;
-    public bool IsFinished;
-    public long MessageID;
-    public long AuthorID;
-    public long ChannelID;
-}
-enum FileType
-{
-    Photo,
-    Document
 }
