@@ -6,13 +6,15 @@
     <Nullable>enable</Nullable>
     <InvariantGlobalization>true</InvariantGlobalization>
     <LangVersion>preview</LangVersion>
-    <Version>2.0.0</Version>
+    <Version>3.0.0</Version>
     <Title>TG File Downloader</Title>
     <Authors>Myitian</Authors>
     <PackageProjectUrl>https://github.com/Myitian/TGFileDownloader</PackageProjectUrl>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <RepositoryUrl>https://github.com/Myitian/TGFileDownloader</RepositoryUrl>
     <PackageTags>telegram;downloader</PackageTags>
+    <GeneratePackageOnBuild>True</GeneratePackageOnBuild>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
   </PropertyGroup>
 
   <ItemGroup>

@@ -1,0 +1,8 @@
+{
+  "profiles": {
+    "TGFileDownloader.CLI.SourceGenerator": {
+      "commandName": "DebugRoslynComponent",
+      "targetProject": "..\\TGFileDownloader.CLI\\TGFileDownloader.CLI.csproj"
+    }
+  }
+}

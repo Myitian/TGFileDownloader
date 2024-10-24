@@ -1,45 +1,70 @@
 ﻿using Microsoft.Data.Sqlite;
-using System.Collections.Concurrent;
 using TL;
-using WTelegram;
 
 namespace TGFileDownloader;
 
 public class FileManager : IDisposable
 {
+    readonly object SQLock = new();
     readonly SqliteConnection connection;
     bool disposed = false;
 
-    public Action<string>? Log { get; set; }
-    public FileManager(bool memoryDB = false)
+    public Action<LogLevel, string>? Log { get; set; }
+
+    public FileManager(bool memoryDB = false, params IEnumerable<KeyValuePair<string, string>>? pragma)
     {
         connection = new SqliteConnection(memoryDB ?
             "Data Source=:memory:" :
             "Data Source=TGFDL.db");
         connection.Open();
 
-        using SqliteCommand command = connection.CreateCommand();
-        command.CommandText = @"
-CREATE TABLE IF NOT EXISTS `FILES` (
-    `ID`              INTEGER  PRIMARY KEY  NOT NULL,
-    `RawFileName`     TEXT,
-    `FileName`        TEXT,
-    `Extension`       TEXT,
-    `MIME`            TEXT,
-    `FileType`        INTEGER               NOT NULL,
-    `FileSize`        INTEGER               NOT NULL,
-    `DownloadedSize`  INTEGER               NOT NULL,
-    `IsFinished`      INTEGER               NOT NULL,
-    `MessageID`       INTEGER               NOT NULL,
-    `AuthorID`        INTEGER               NOT NULL,
-    `ChannelID`       INTEGER               NOT NULL,
-    `ExtraData`       BLOB
-)";
-        command.ExecuteNonQuery();
+        using (SqliteCommand commandPragma = connection.CreateCommand())
+        {
+            commandPragma.CommandText = "PRAGMA $k = $v;";
+            SqliteParameter pK = CreateParameter("$k");
+            commandPragma.Parameters.Add(pK);
+            SqliteParameter pV = CreateParameter("$v");
+            commandPragma.Parameters.Add(pV);
+            if (pragma is not null)
+                foreach ((string key, string value) in pragma)
+                    try
+                    {
+                        Log?.Invoke(LogLevel.INFO, $"Try set pragma {key} to {value}");
+                        pK.Value = key;
+                        pV.Value = value;
+                        commandPragma.ExecuteNonQuery();
+                    }
+                    catch { }
+        }
+
+        using (SqliteCommand command = connection.CreateCommand())
+        {
+            command.CommandText = """
+                CREATE TABLE IF NOT EXISTS `FILES` (
+                    `ID`              INTEGER  PRIMARY KEY  NOT NULL,
+                    `RawFileName`     TEXT,
+                    `FileName`        TEXT,
+                    `Extension`       TEXT,
+                    `MIME`            TEXT,
+                    `FileType`        INTEGER               NOT NULL,
+                    `FileSize`        INTEGER               NOT NULL,
+                    `DownloadedSize`  INTEGER               NOT NULL,
+                    `IsFinished`      INTEGER               NOT NULL,
+                    `MessageID`       INTEGER               NOT NULL,
+                    `AuthorID`        INTEGER               NOT NULL,
+                    `ChannelID`       INTEGER               NOT NULL,
+                    `ExtraData`       BLOB
+                )
+                """;
+            command.ExecuteNonQuery();
+        }
+
         try
         {
+            const string sql = "ALTER TABLE `FILES` ADD COLUMN `ExtraData` BLOB;";
+            Log?.Invoke(LogLevel.INFO, $"Try execute {sql}");
             using SqliteCommand commandAddBlob = connection.CreateCommand();
-            commandAddBlob.CommandText = "ALTER TABLE `FILES` ADD COLUMN `ExtraData` BLOB;";
+            commandAddBlob.CommandText = sql;
             commandAddBlob.ExecuteNonQuery();
         }
         catch { }
@@ -58,15 +83,14 @@ CREATE TABLE IF NOT EXISTS `FILES` (
     public Stream? GetExtraData(long id)
     {
         using SqliteCommand command = connection.CreateCommand();
-        command.CommandText =
-@"
-SELECT
-    `ExtraData`
-FROM
-    `FILES`
-WHERE
-    `ID` == $ID;
-";
+        command.CommandText = """
+            SELECT
+                `ExtraData`
+            FROM
+                `FILES`
+            WHERE
+                `ID` == $ID;
+            """;
         SqliteParameter parameter = CreateParameter("$ID", id);
         command.Parameters.Add(parameter);
         using SqliteDataReader reader = command.ExecuteReader();
@@ -80,26 +104,25 @@ WHERE
     public TGFileInfo? GetFileInfo(long id)
     {
         using SqliteCommand command = connection.CreateCommand();
-        command.CommandText =
-@"
-SELECT
-    `ID`            ,
-    `RawFileName`   ,
-    `FileName`      ,
-    `Extension`     ,
-    `MIME`          ,
-    `FileType`      ,
-    `FileSize`      ,
-    `DownloadedSize`,
-    `IsFinished`    ,
-    `MessageID`     ,
-    `AuthorID`      ,
-    `ChannelID`
-FROM
-    `FILES`
-WHERE
-    `ID` == $ID;
-";
+        command.CommandText = """
+            SELECT
+                `ID`            ,
+                `RawFileName`   ,
+                `FileName`      ,
+                `Extension`     ,
+                `MIME`          ,
+                `FileType`      ,
+                `FileSize`      ,
+                `DownloadedSize`,
+                `IsFinished`    ,
+                `MessageID`     ,
+                `AuthorID`      ,
+                `ChannelID`
+            FROM
+                `FILES`
+            WHERE
+                `ID` == $ID;
+            """;
         SqliteParameter parameter = CreateParameter("$ID", id);
         command.Parameters.Add(parameter);
         using SqliteDataReader reader = command.ExecuteReader();
@@ -125,16 +148,15 @@ WHERE
     public bool QueryIsFinished(long id, out string? fileName)
     {
         using SqliteCommand command = connection.CreateCommand();
-        command.CommandText =
-@"
-SELECT
-    `IsFinished`,
-    `FileName`
-FROM
-    `FILES`
-WHERE
-    `ID` == $ID;
-";
+        command.CommandText = """
+            SELECT
+                `IsFinished`,
+                `FileName`
+            FROM
+                `FILES`
+            WHERE
+                `ID` == $ID;
+            """;
         SqliteParameter parameter = CreateParameter("$ID", id);
         command.Parameters.Add(parameter);
         using SqliteDataReader reader = command.ExecuteReader();
@@ -149,66 +171,67 @@ WHERE
 
     public int UpdateExtraData(long id, byte[] data)
     {
-        using SqliteCommand command = connection.CreateCommand();
-        command.CommandText =
-@"
-UPDATE `FILES` SET
-    `ExtraData`      = $ExtraData
-WHERE
-    `ID`             = $ID            ;
-";
-        SqliteParameter pID = CreateParameter("$ID", id);
-        command.Parameters.Add(pID);
-        SqliteParameter pExtraData = CreateParameter("$ExtraData", data);
-        command.Parameters.Add(pExtraData);
+        lock (SQLock)
+        {
+            using SqliteCommand command = connection.CreateCommand();
+            command.CommandText = """
+                UPDATE `FILES` SET
+                    `ExtraData`      = $ExtraData
+                WHERE
+                    `ID`             = $ID            ;
+                """;
+            SqliteParameter pID = CreateParameter("$ID", id);
+            command.Parameters.Add(pID);
+            SqliteParameter pExtraData = CreateParameter("$ExtraData", data);
+            command.Parameters.Add(pExtraData);
 
-        return command.ExecuteNonQuery();
+            return command.ExecuteNonQuery();
+        }
     }
 
     public int UpdateFileInfo(TGFileInfo info)
     {
         using SqliteCommand command = connection.CreateCommand();
-        command.CommandText =
-@"
-INSERT INTO `FILES` (
-    `ID`            ,
-    `RawFileName`   ,
-    `FileName`      ,
-    `Extension`     ,
-    `MIME`          ,
-    `FileType`      ,
-    `FileSize`      ,
-    `DownloadedSize`,
-    `IsFinished`    ,
-    `MessageID`     ,
-    `AuthorID`      ,
-    `ChannelID`
-) VALUES (
-    $ID            ,
-    $RawFileName   ,
-    $FileName      ,
-    $Extension     ,
-    $MIME          ,
-    $FileType      ,
-    $FileSize      ,
-    $DownloadedSize,
-    $IsFinished    ,
-    $MessageID     ,
-    $AuthorID      ,
-    $ChannelID     
-) ON CONFLICT (`ID`) DO UPDATE SET
-    `RawFileName`    = excluded.`RawFileName`   ,
-    `FileName`       = excluded.`FileName`      ,
-    `Extension`      = excluded.`Extension`     ,
-    `MIME`           = excluded.`MIME`          ,
-    `FileType`       = excluded.`FileType`      ,
-    `FileSize`       = excluded.`FileSize`      ,
-    `DownloadedSize` = excluded.`DownloadedSize`,
-    `IsFinished`     = excluded.`IsFinished`    ,
-    `MessageID`      = excluded.`MessageID`     ,
-    `AuthorID`       = excluded.`AuthorID`      ,
-    `ChannelID`      = excluded.`ChannelID`     ;
-";
+        command.CommandText = """
+            INSERT INTO `FILES` (
+                `ID`            ,
+                `RawFileName`   ,
+                `FileName`      ,
+                `Extension`     ,
+                `MIME`          ,
+                `FileType`      ,
+                `FileSize`      ,
+                `DownloadedSize`,
+                `IsFinished`    ,
+                `MessageID`     ,
+                `AuthorID`      ,
+                `ChannelID`
+            ) VALUES (
+                $ID            ,
+                $RawFileName   ,
+                $FileName      ,
+                $Extension     ,
+                $MIME          ,
+                $FileType      ,
+                $FileSize      ,
+                $DownloadedSize,
+                $IsFinished    ,
+                $MessageID     ,
+                $AuthorID      ,
+                $ChannelID     
+            ) ON CONFLICT (`ID`) DO UPDATE SET
+                `RawFileName`    = excluded.`RawFileName`   ,
+                `FileName`       = excluded.`FileName`      ,
+                `Extension`      = excluded.`Extension`     ,
+                `MIME`           = excluded.`MIME`          ,
+                `FileType`       = excluded.`FileType`      ,
+                `FileSize`       = excluded.`FileSize`      ,
+                `DownloadedSize` = excluded.`DownloadedSize`,
+                `IsFinished`     = excluded.`IsFinished`    ,
+                `MessageID`      = excluded.`MessageID`     ,
+                `AuthorID`       = excluded.`AuthorID`      ,
+                `ChannelID`      = excluded.`ChannelID`     ;
+            """;
         SqliteParameter pID = CreateParameter("$ID", info.ID);
         command.Parameters.Add(pID);
         SqliteParameter pRawFileName = CreateParameter("$RawFileName", info.RawFileName);
@@ -240,13 +263,12 @@ INSERT INTO `FILES` (
     public int UpdateFileIsFinished(long id, bool isFinished)
     {
         using SqliteCommand command = connection.CreateCommand();
-        command.CommandText =
-@"
-UPDATE `FILES` SET
-    `IsFinished`     = $IsFinished
-WHERE
-    `ID`             = $ID            ;
-";
+        command.CommandText = """
+            UPDATE `FILES` SET
+                `IsFinished`     = $IsFinished
+            WHERE
+                `ID`             = $ID            ;
+            """;
         SqliteParameter pID = CreateParameter("$ID", id);
         command.Parameters.Add(pID);
         SqliteParameter pIsFinished = CreateParameter("$IsFinished", isFinished);
@@ -258,13 +280,12 @@ WHERE
     public int UpdateFileName(long id, string fileName)
     {
         using SqliteCommand command = connection.CreateCommand();
-        command.CommandText =
-@"
-UPDATE `FILES` SET
-    `FileName`       = $FileName
-WHERE
-    `ID`             = $ID            ;
-";
+        command.CommandText = """
+            UPDATE `FILES` SET
+                `FileName`       = $FileName
+            WHERE
+                `ID`             = $ID            ;
+            """;
         SqliteParameter pID = CreateParameter("$ID", id);
         command.Parameters.Add(pID);
         SqliteParameter pFileName = CreateParameter("$FileName", fileName);
@@ -275,70 +296,69 @@ WHERE
 
     public void UpdateFileProgress(long id, long downloadedSize, Storage_FileType? type = null)
     {
-        bool isPhoto = false;
-        if (type.HasValue)
-            using (SqliteCommand commandRead = connection.CreateCommand())
-            {
-                commandRead.CommandText =
-@"
-SELECT
-    `FileType`
-FROM
-    `FILES`
-WHERE
-    `ID` == $ID;
-";
-                SqliteParameter parameter = CreateParameter("$ID", id);
-                commandRead.Parameters.Add(parameter);
-                switch (commandRead.ExecuteScalar())
+        lock (SQLock)
+        {
+            bool isPhoto = false;
+            if (type.HasValue)
+                using (SqliteCommand commandRead = connection.CreateCommand())
                 {
-                    case null:
-                        return;
-                    case long v when v == (long)FileType.Photo:
-                        isPhoto = true;
-                        break;
+                    commandRead.CommandText = """
+                        SELECT
+                            `FileType`
+                        FROM
+                            `FILES`
+                        WHERE
+                            `ID` == $ID;
+                        """;
+                    SqliteParameter parameter = CreateParameter("$ID", id);
+                    commandRead.Parameters.Add(parameter);
+                    switch (commandRead.ExecuteScalar())
+                    {
+                        case null:
+                            return;
+                        case long v when v == (long)FileType.Photo:
+                            isPhoto = true;
+                            break;
+                    }
                 }
+            using SqliteCommand commandWrite = connection.CreateCommand();
+            if (isPhoto && type.HasValue)
+            {
+                commandWrite.CommandText = """
+                    UPDATE `FILES` SET
+                        `Extension`      = $Extension     ,
+                        `MIME`           = $MIME          ,
+                        `DownloadedSize` = $DownloadedSize
+                    WHERE
+                        `ID`             = $ID            ;
+                    """;
+                SqliteParameter pExtension = CreateParameter("$Extension", $".{type.Value}");
+                commandWrite.Parameters.Add(pExtension);
+                SqliteParameter pMIME = CreateParameter("$MIME", type.Value.GetMIME());
+                commandWrite.Parameters.Add(pMIME);
+                SqliteParameter pDownloadedSize = CreateParameter("$DownloadedSize", downloadedSize);
+                commandWrite.Parameters.Add(pDownloadedSize);
+                SqliteParameter pID = CreateParameter("$ID", id);
+                commandWrite.Parameters.Add(pID);
             }
-        using SqliteCommand commandWrite = connection.CreateCommand();
-        if (isPhoto && type.HasValue)
-        {
-            commandWrite.CommandText =
-@"
-UPDATE `FILES` SET
-    `Extension`      = $Extension     ,
-    `MIME`           = $MIME          ,
-    `DownloadedSize` = $DownloadedSize
-WHERE
-    `ID`             = $ID            ;
-";
-            SqliteParameter pExtension = CreateParameter("$Extension", $".{type.Value}");
-            commandWrite.Parameters.Add(pExtension);
-            SqliteParameter pMIME = CreateParameter("$MIME", type.Value.GetMIME());
-            commandWrite.Parameters.Add(pMIME);
-            SqliteParameter pDownloadedSize = CreateParameter("$DownloadedSize", downloadedSize);
-            commandWrite.Parameters.Add(pDownloadedSize);
-            SqliteParameter pID = CreateParameter("$ID", id);
-            commandWrite.Parameters.Add(pID);
+            else
+            {
+                commandWrite.CommandText = """
+                    UPDATE `FILES` SET
+                        `DownloadedSize` = $DownloadedSize
+                    WHERE
+                        `ID`             = $ID            ;
+                    """;
+                SqliteParameter pDownloadedSize = CreateParameter("$DownloadedSize", downloadedSize);
+                commandWrite.Parameters.Add(pDownloadedSize);
+                SqliteParameter pID = CreateParameter("$ID", id);
+                commandWrite.Parameters.Add(pID);
+            }
+            commandWrite.ExecuteNonQuery();
         }
-        else
-        {
-            commandWrite.CommandText =
-@"
-UPDATE `FILES` SET
-    `DownloadedSize` = $DownloadedSize
-WHERE
-    `ID`             = $ID            ;
-";
-            SqliteParameter pDownloadedSize = CreateParameter("$DownloadedSize", downloadedSize);
-            commandWrite.Parameters.Add(pDownloadedSize);
-            SqliteParameter pID = CreateParameter("$ID", id);
-            commandWrite.Parameters.Add(pID);
-        }
-        commandWrite.ExecuteNonQuery();
-
     }
 
-    static SqliteParameter CreateParameter(string name, object? value)
+    static SqliteParameter CreateParameter(string name, object? value = null)
     {
         return new(name, value ?? DBNull.Value);
     }

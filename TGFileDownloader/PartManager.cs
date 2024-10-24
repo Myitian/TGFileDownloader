@@ -1,5 +1,4 @@
-﻿using System.Buffers;
-using System.Buffers.Binary;
+﻿using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
 
@@ -25,15 +24,19 @@ public struct PartResult(PartStatus status, string? message = null)
     public string? Message = message;
     public PartStatus Status = status;
 }
-public class PartManager : IDisposable
+public class PartManager
 {
     public Action<long, int, IEnumerable<Part>>? PartInfoSaver;
     private readonly object lockObj = new();
     private readonly ConcurrentBag<Part> unusedParts = [];
     private readonly ConcurrentDictionary<long, Part> usingParts = [];
-    private bool isCompleted = false;
 
-    public Action<string>? Log { get; set; }
+    public bool IsCompleted { get; private set; } = false;
+    public bool IsFailed { get; private set; } = false;
+
+
+
+    public Action<LogLevel, string>? Log { get; set; }
 
     public PartManager(int partSize, params IEnumerable<Part>? parts)
     {
@@ -85,28 +88,21 @@ public class PartManager : IDisposable
         }
     }
 
-    public void Dispose()
-    {
-        if (isCompleted)
-            return;
-        isCompleted = true;
-        GC.SuppressFinalize(this);
-    }
-
     public void LoadParts(Part? clamp = null, params IEnumerable<Part>? parts)
     {
         if (!usingParts.IsEmpty)
             throw new InvalidOperationException();
         lock (lockObj)
         {
-            isCompleted = false;
+            IsCompleted = false;
+            IsFailed = false;
             unusedParts.Clear();
 
             List<Part> partList = [.. parts];
             Span<Part> partSpan = CollectionsMarshal.AsSpan(partList);
             partSpan.Sort();
 
-            Log?.Invoke($"Load parts #1: {partSpan.Length}");
+            Log?.Invoke(LogLevel.DEBUG, $"Load parts #1: {partSpan.Length}");
 
             if (clamp.HasValue)
             {
@@ -168,7 +164,7 @@ public class PartManager : IDisposable
                     break;
             }
 
-            Log?.Invoke($"Load parts #2: {unusedParts.Count}");
+            Log?.Invoke(LogLevel.DEBUG, $"Load parts #2: {unusedParts.Count}");
         }
     }
 
@@ -176,18 +172,22 @@ public class PartManager : IDisposable
     {
         lock (lockObj)
         {
-            Log?.Invoke($"Part {offset}: {result.Status} {result.Message}");
             switch (result.Status)
             {
                 case PartStatus.Normal:
                     usingParts.Remove(offset, out _);
+                    if (Count == 0)
+                        IsCompleted = true;
                     break;
                 case PartStatus.Error:
+                    Log?.Invoke(LogLevel.WARN, $"Part {offset}: {result.Status} {result.Message}");
                     if (usingParts.Remove(offset, out Part part))
                         unusedParts.Add(part);
                     break;
                 case PartStatus.Fatal:
-                    isCompleted = true;
+                    Log?.Invoke(LogLevel.ERROR, $"Part {offset}: {result.Status} {result.Message}");
+                    IsCompleted = true;
+                    IsFailed = true;
                     if (usingParts.Remove(offset, out part))
                         unusedParts.Add(part);
                     break;
@@ -197,7 +197,7 @@ public class PartManager : IDisposable
 
     public Part? RequestPart()
     {
-        if (isCompleted)
+        if (IsCompleted)
             return null;
         lock (lockObj)
         {
@@ -221,7 +221,6 @@ public class PartManager : IDisposable
     {
         lock (lockObj)
         {
-            Log?.Invoke($"Save parts for {id}");
             PartInfoSaver?.Invoke(id, Count, GetParts());
         }
     }

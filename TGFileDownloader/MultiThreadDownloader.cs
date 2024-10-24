@@ -4,37 +4,36 @@ using WTelegram;
 
 namespace TGFileDownloader;
 
-public delegate void ProgressChangedCallback(long transmitted, long totalSize);
+public delegate void ProgressChangedCallback(long transmitted, long totalSize, bool newFile = false);
 
 public class MultiThreadDownloader
 {
     private readonly object downloadLock = new();
-
-    public Action<string>? Log { get => partManager.Log; set => partManager.Log = value; }
-
     private readonly PartManager partManager;
+
     public MultiThreadDownloader(
         Client client,
         int threadCount,
         int maxPartSize,
+        FileManager fileManager,
         Action<Client>? clientInit = null,
-        Action<long, Part, PartResult>? partFailed = null)
+        Action<LogLevel, string>? log = null)
     {
         Client = client;
-        FileManager = new();
+        FileManager = fileManager;
         partManager = new(maxPartSize)
         {
             PartInfoSaver = SaveParts
         };
         ThreadCount = threadCount;
         ClientInit = clientInit;
-        PartFailed = partFailed;
+        Log = log;
     }
 
     public Client Client { get; }
-    public Action<Client>? ClientInit { get; set; }
     public FileManager FileManager { get; }
-    public Action<long, Part, PartResult>? PartFailed { get; set; }
+    public Action<Client>? ClientInit { get; set; }
+    public Action<LogLevel, string>? Log { get => partManager.Log; set => partManager.Log = value; }
 
     public int ThreadCount { get; set; }
 
@@ -49,8 +48,13 @@ public class MultiThreadDownloader
         long id = photo.id;
         PhotoSizeBase photoSize = photo.LargestPhotoSize;
         TGFileInfo? fileInfo = FileManager.GetFileInfo(id);
-        if (!fileInfo.HasValue)
+        if (fileInfo.HasValue)
         {
+            progress?.Invoke(fileInfo.Value.DownloadedSize, photoSize.FileSize, true);
+        }
+        else
+        {
+            progress?.Invoke(0, photoSize.FileSize, true);
             fileInfo = new()
             {
                 ID = id,
@@ -82,8 +86,13 @@ public class MultiThreadDownloader
     {
         long id = document.id;
         TGFileInfo? fileInfo = FileManager.GetFileInfo(id);
-        if (!fileInfo.HasValue)
+        if (fileInfo.HasValue)
         {
+            progress?.Invoke(fileInfo.Value.DownloadedSize, document.size, true);
+        }
+        else
+        {
+            progress?.Invoke(0, document.size, true);
             fileInfo = new()
             {
                 ID = id,
@@ -99,6 +108,7 @@ public class MultiThreadDownloader
                 ChannelID = channel
             };
             FileManager.UpdateFileInfo(fileInfo.Value);
+
         }
         InputDocumentFileLocation location = document.ToFileLocation((PhotoSizeBase?)null);
         Storage_FileType result = await DownloadFileAsync(location, outputStream, id, document.dc_id, document.size, 0, progress);
@@ -120,11 +130,11 @@ public class MultiThreadDownloader
         }
         else
         {
-            return await NonParallelDownloadFileAsync(fileLocation, outputStream, id, dc_id, fileSize, offset, progress);
+            return await SequentialDownloadFileAsync(fileLocation, outputStream, id, dc_id, fileSize, offset, progress);
         }
     }
 
-    public async Task<Storage_FileType> NonParallelDownloadFileAsync(
+    public async Task<Storage_FileType> SequentialDownloadFileAsync(
         InputFileLocationBase fileLocation,
         Stream outputStream,
         long id,
@@ -133,6 +143,7 @@ public class MultiThreadDownloader
         long offset = 0,
         ProgressChangedCallback? progress = null)
     {
+        Log?.Invoke(LogLevel.INFO, $"Sequential download started: {id}");
         Storage_FileType fileType = Storage_FileType.unknown;
         Client client = await GetClientForDC(Client, -dc_id, true);
         if (outputStream.CanSeek)
@@ -207,6 +218,7 @@ public class MultiThreadDownloader
         long offset = 0,
         ProgressChangedCallback? progress = null)
     {
+        Log?.Invoke(LogLevel.INFO, $"Parallel download started: {id}");
         lock (downloadLock)
         {
             Part mainArea = new(offset, fileSize - offset);
@@ -241,7 +253,7 @@ public class MultiThreadDownloader
             info.AllDone.WaitOne();
             FileManager.UpdateFileProgress(info.ID, info.Transmitted);
             info.ProgressChanged?.Invoke(info.Transmitted, info.FileSize);
-            if (partManager.Count == 0 && partManager.TotalLength == 0)
+            if (partManager.Count == 0 && partManager.TotalLength == 0 && info.FailedThreads == 0)
             {
                 FileManager.UpdateFileIsFinished(id, true);
             }
@@ -318,6 +330,7 @@ public class MultiThreadDownloader
         Part? part;
         try
         {
+            bool failed = false;
             while ((part = partManager.RequestPart()).HasValue)
             {
                 PartResult result = new(PartStatus.Fatal);
@@ -326,12 +339,19 @@ public class MultiThreadDownloader
                     int len = partManager.PartSize;
                     result = await DownloadPartAsync(part.Value, len, info);
                 }
+                catch
+                {
+                    failed = true;
+                    throw;
+                }
                 finally
                 {
                     partManager.ReportPartResult(part.Value.Offset, result);
                     partManager.SaveParts(info.ID);
                 }
             }
+            if (!failed)
+                Interlocked.Decrement(ref info.FailedThreads);
         }
         finally
         {
@@ -376,6 +396,7 @@ public class MultiThreadDownloader
         public Stream OutputStream = outputStream;
         public ProgressChangedCallback? ProgressChanged = progressChanged;
         public int RunningThreads = runningThreads;
+        public int FailedThreads = runningThreads;
         public long Transmitted = transmitted;
 
         public void Dispose()
