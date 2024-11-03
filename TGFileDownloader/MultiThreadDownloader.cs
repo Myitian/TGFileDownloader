@@ -290,7 +290,8 @@ public class MultiThreadDownloader
             return new(PartStatus.Error, "fileData.bytes.Length != part.Length");
         if (fileData.bytes.Length != 0)
         {
-            info.FileType = fileData.type;
+            if (fileData.type != Storage_FileType.partial)
+                info.FileType = fileData.type;
             lock (info.Lock)
             {
                 try

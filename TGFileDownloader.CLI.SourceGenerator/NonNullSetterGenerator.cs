@@ -242,13 +242,6 @@ public class NonNullSetterGenerator : IIncrementalGenerator
         sb.Append(' ', (depth + 1) * 4)
             .Append(model.FieldName)
             .AppendLine(" = value;");
-        depth--;
-        sb.Append(' ', depth * 4)
-            .AppendLine("}");
-        depth--;
-        sb.Append(' ', depth * 4)
-            .AppendLine("}");
-        sb.AppendLine();
         while (depth > 0)
         {
             depth--;

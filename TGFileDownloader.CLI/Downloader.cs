@@ -18,7 +18,6 @@ static partial class Downloader
     static long startTransmitted = 0;
     static long prevReportTick = 0;
     static long prevTransmitted = 0;
-    static long prevTotalSize = 0;
 
     static void ReportProgress(long transmitted, long totalSize, bool newFile = false)
     {
@@ -34,7 +33,6 @@ static partial class Downloader
                 prevReportTick = currentTick;
                 startTick = currentTick;
                 startTransmitted = transmitted;
-                prevTotalSize = totalSize;
             }
             else if (transmitted == totalSize)
             {
@@ -176,7 +174,13 @@ static partial class Downloader
         }
     }
 
-    static async Task<bool> Download(MultiThreadDownloader downloader, PhotoBase photo, long msgId, long msgAuthor, long msgChannel)
+    static async Task<bool> Download(
+        MultiThreadDownloader downloader,
+        PhotoBase photo,
+        long msgId,
+        long msgAuthor,
+        long msgChannel,
+        DateTime lastWrite)
     {
         switch (photo)
         {
@@ -188,8 +192,8 @@ static partial class Downloader
                     if (downloader.FileManager.QueryIsFinished(p.ID, out string? s))
                     {
                         SyncConsole.WriteLine($"{p.ID} 已下载，正在跳过……");
-                        if (!File.Exists(tmp))
-                            return false;
+                        if (!File.Exists(tmp) || s is not null)
+                            return true;
                     }
                     else
                     {
@@ -214,6 +218,7 @@ static partial class Downloader
                     string fileName = $"p{p.ID}{ext}";
                     string realFileName = Path.Combine(saveDir, fileName);
                     File.Move(realTmp, realFileName, true);
+                    File.SetLastWriteTimeUtc(realFileName, lastWrite.ToUniversalTime());
                     downloader.FileManager.UpdateFileName(p.ID, fileName);
                     SyncConsole.WriteLine($"将 {p.ID} 保存为 {fileName}");
                 }
@@ -224,7 +229,13 @@ static partial class Downloader
         }
         return true;
     }
-    static async Task<bool> Download(MultiThreadDownloader downloader, DocumentBase document, long msgId, long msgAuthor, long msgChannel)
+    static async Task<bool> Download(
+        MultiThreadDownloader downloader,
+        DocumentBase document,
+        long msgId,
+        long msgAuthor,
+        long msgChannel,
+        DateTime lastWrite)
     {
         switch (document)
         {
@@ -235,7 +246,7 @@ static partial class Downloader
                     if (downloader.FileManager.QueryIsFinished(d.ID, out string? s))
                     {
                         SyncConsole.WriteLine($"{d.ID} 已下载，正在跳过……");
-                        if (!File.Exists(tmp))
+                        if (!File.Exists(tmp) || s is not null)
                             return true;
                     }
                     else
@@ -256,7 +267,7 @@ static partial class Downloader
                             return false;
                         }
                     }
-                    string fileName = d.Filename;
+                    string fileName = d.Filename ?? $"d{d.ID}.{MIMETypes.GetExtension(d.mime_type)}";
                     int extLength = RxEnd().Match(fileName).Length;
                     string originalFileName = Path.Combine(saveDir, fileName);
                     string realFileName = originalFileName;
@@ -266,6 +277,7 @@ static partial class Downloader
                         realFileName = AddNum(originalFileName, ++i, extLength);
                     }
                     File.Move(realTmp, realFileName, true);
+                    File.SetLastWriteTimeUtc(realFileName, lastWrite.ToUniversalTime());
                     string namePart = Path.GetFileName(realFileName);
                     SyncConsole.WriteLine($"将 {d.ID} 保存为 {namePart}");
                     downloader.FileManager.UpdateFileName(d.ID, namePart);
@@ -361,7 +373,13 @@ static partial class Downloader
                     if (msgBase is Message msg && msg.media is not null)
                     {
                         SyncConsole.WriteLine($"[{from}/{msg.ID}/{msg.Date:O}]>>");
-                        if (await ProcessMedia(downloader, msg.media, msg.ID, from.ID, chatId))
+                        if (await ProcessMedia(
+                            downloader,
+                            msg.media,
+                            msg.ID,
+                            from.ID,
+                            chatId,
+                            msg.edit_date > msg.date ? msg.edit_date : msg.date))
                             break;
                     }
                     else
@@ -379,7 +397,13 @@ static partial class Downloader
         }
         SyncConsole.Log(LogLevel.WARN, "Done!");
     }
-    static async Task<bool> ProcessMedia(MultiThreadDownloader downloader, MessageMedia msgMedia, long msgId, long msgAuthor, long msgChannel)
+    static async Task<bool> ProcessMedia(
+        MultiThreadDownloader downloader,
+        MessageMedia msgMedia,
+        long msgId,
+        long msgAuthor,
+        long msgChannel,
+        DateTime lastWrite)
     {
         try
         {
@@ -387,15 +411,15 @@ static partial class Downloader
             {
                 case MessageMediaPhoto photo:
                     SyncConsole.WriteLine("[Photo]", photo.photo.ID);
-                    return await Download(downloader, photo.photo, msgId, msgAuthor, msgChannel);
+                    return await Download(downloader, photo.photo, msgId, msgAuthor, msgChannel, lastWrite);
                 case MessageMediaDocument document:
                     SyncConsole.WriteLine("[Document]", document.document.ID);
-                    return await Download(downloader, document.document, msgId, msgAuthor, msgChannel);
+                    return await Download(downloader, document.document, msgId, msgAuthor, msgChannel, lastWrite);
                 case MessageMediaPaidMedia paidmedia:
                     SyncConsole.WriteLine("[PaidMedia]");
                     foreach (MessageExtendedMedia media in paidmedia.extended_media.OfType<MessageExtendedMedia>())
                     {
-                        if (!await ProcessMedia(downloader, media.media, msgId, msgAuthor, msgChannel))
+                        if (!await ProcessMedia(downloader, media.media, msgId, msgAuthor, msgChannel, lastWrite))
                             return false;
                     }
                     return true;
